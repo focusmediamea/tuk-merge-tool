@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Focus Media · Data Merge Tool</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{--amber:#C8860D;--amber-dark:#a8710b;--dark:#161616;--page:#f4f4f5;--ink:#1d1d1f;--muted:#6e6e73}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,system-ui,"Segoe UI",sans-serif;background:var(--page);color:var(--ink);display:flex;justify-content:center;padding:40px 16px}
+  .card{width:100%;max-width:720px;background:#fff;border-radius:18px;box-shadow:0 6px 30px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:var(--dark);border-bottom:3px solid var(--amber);padding:26px;text-align:center}
+  .header img{max-height:58px;max-width:90%;vertical-align:middle}
+  .body{padding:30px 34px 36px}
+  h1{font-size:19px;text-align:center;margin:0 0 6px}
+  .sub{color:var(--muted);font-size:13px;text-align:center;margin:0 0 22px;line-height:1.5}
+  #drop{border:2px dashed #d2d2d7;border-radius:14px;padding:38px;text-align:center;color:var(--muted);cursor:pointer;transition:.2s;font-size:15px}
+  #drop.hl{border-color:var(--amber);background:#fdf6e9;color:var(--amber-dark)}
+  .files{font-size:13px;margin:12px 2px;color:var(--ink)} .files div{padding:2px 0}
+  .actions{text-align:center;margin-top:18px}
+  button{border:0;border-radius:11px;padding:12px 26px;font-size:15px;font-weight:600;cursor:pointer;transition:.15s}
+  #run{background:var(--amber);color:#fff} #run:hover:not(:disabled){background:var(--amber-dark)}
+  #run:disabled{background:#dcdce0;color:#9a9aa0;cursor:not-allowed}
+  #downloads{text-align:center;margin-top:16px}
+  .dl{background:#2e9e5b;color:#fff;margin:6px 6px} .dl:hover{background:#26834b}
+  .logwrap{margin-top:24px;background:var(--dark);border-radius:14px;overflow:hidden}
+  .loglabel{font:600 11px/1 ui-monospace,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase;color:#8a8a8f;padding:12px 16px 0}
+  #log{font:12px/1.65 ui-monospace,Menlo,monospace;color:#e6e6e7;padding:8px 16px 16px;white-space:pre-wrap;min-height:54px;max-height:420px;overflow:auto}
+  .warn{color:#ffd60a} .hd{color:#e6b84d;font-weight:bold} .ok{color:#4cd07d}
+  .foot{text-align:center;color:#a1a1a6;font-size:11px;margin-top:20px}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <img src="logo.png" alt="Focus Media" onerror="this.style.display='none'">
+    </div>
+    <div class="body">
+      <h1>Dubai / Abu Dhabi Data Merge Tool</h1>
+      <p class="sub">Drop the 4 exported files (building lists & point lists for both cities).<br>Files stay on your machine — nothing is uploaded.</p>
+      <div id="drop">Drop the 4 .xlsx files here, or click to choose</div>
+      <input id="file" type="file" accept=".xlsx" multiple hidden>
+      <div class="files" id="filelist"></div>
+      <div class="actions"><button id="run" disabled>Merge</button></div>
+      <div id="downloads"></div>
+      <div class="logwrap">
+        <div class="loglabel">Log</div>
+        <div id="log">Waiting for files…</div>
+      </div>
+      <div class="foot">Focus Media · Middle East &amp; Africa Region</div>
+    </div>
+  </div>
+<script>
+// ===== CONFIG =====
+const KEEP_BUILDING=["Project ID","Project Name","City","Project Type","Level","District","Building Quantity","Floor Quantity","Stay Rate","Year Built","Building Appearance","Additional Points","Location/Region","32-V","32-H","25","55","Total Screens","Address","Project Status","Restricted Industries","Permitted Ad Words","GoogleMapURL"];
+const KEEP_POINT=["Project ID","Project Name","Project Type","City","District","Building","Inside/Outside","Screen Location","Screen Point ID","Media Type","Device Model","ID","SN","Sim Card No.","Install Date","Screen Status","Inspecting Status","Wall Type"];
+const KEEP_SALES=["Project Name","City","Project Type","Level","District","Building Quantity","Floor Quantity","Stay Rate","Year Built","Building Appearance","Additional Points","Location/Region","25","32-V","32-H","55","Total Screens","Address","GoogleMapURL"];
+const ALIASES={"adress":"Address","projectname":"Project Name"};
+const DEVICE_MAP={"25":"[Smart Interactive] 25 Inch","32-H":"[Horizontal] 32 Inch","32-V":"[Smart Interactive] 32 Inch","55":"[Smart Interactive] 55 Inch"};
+const INSTALLED="installed", NORMAL="normal";
+const STATUS_OK=["signed","expired"];
+const EXCLUDE_INDUSTRY="camisole";
+const EXCLUDE_WALL="wallpaper";
+const EXCLUDE_NAME="focusmedia";
+const BUILDING_SIG=["floor quantity","year built","building quantity"];
+const POINT_SIG=["screen point id","install date","sn"];
+// ==================
+const DATE=(()=>{const d=new Date(),p=n=>String(n).padStart(2,"0");return ""+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate());})();
+const loose=s=>String(s).toLowerCase().replace(/[^a-z0-9]/g,"");
+const digits=s=>String(s).replace(/\D/g,"");
+const findH=(headers,exact,sub)=>{let i=headers.findIndex(h=>loose(h)===exact);if(i<0&&sub)i=headers.findIndex(h=>loose(h).includes(sub));return i;};
+const lut=keep=>{const m={};keep.forEach(c=>m[loose(c)]=c);for(const k in ALIASES)m[loose(k)]=ALIASES[k];return m;};
+let chosen=[]; const $=id=>document.getElementById(id);
+const log=(t,c)=>{$("log").innerHTML+=(c?`<span class="${c}">${t}</span>`:t)+"\n";};
+const drop=$("drop"),fileInput=$("file");
+drop.onclick=()=>fileInput.click();
+["dragover","dragenter"].forEach(e=>drop.addEventListener(e,v=>{v.preventDefault();drop.classList.add("hl");}));
+["dragleave","drop"].forEach(e=>drop.addEventListener(e,v=>{v.preventDefault();drop.classList.remove("hl");}));
+drop.addEventListener("drop",v=>handleFiles(v.dataTransfer.files));
+fileInput.onchange=()=>handleFiles(fileInput.files);
+function handleFiles(list){
+  chosen=[...list].filter(f=>f.name.toLowerCase().endsWith(".xlsx"));
+  $("filelist").innerHTML=chosen.map(f=>`<div>📄 ${f.name}</div>`).join("");
+  $("run").disabled=chosen.length===0;
+  $("log").innerHTML="Selected "+chosen.length+" file(s). Click \u201CMerge\u201D.\n";
+}
+function emit(kind,all,keep){
+  const label=kind==="building"?"Project List":kind==="point"?"Point List":"Sales List";
+  const name=label+" Merge "+DATE+".xlsx";
+  log(`✓ ${label}: ${all.length} rows → ${name}`);
+  const b=document.createElement("button");
+  b.className="dl";b.textContent=`Download ${label} (${all.length} rows)`;
+  b.onclick=()=>{const ws=XLSX.utils.json_to_sheet(all,{header:keep});const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Unified");XLSX.writeFile(wb,name);};
+  $("downloads").appendChild(b);
+}
+function rowFrom(r,keep,ci,city){
+  const o={};keep.forEach(c=>{let v=ci[c]>=0?r[ci[c]]:"";if(typeof v==="string")v=v.trim();o[c]=v;});
+  if(keep.includes("City")&&!o["City"])o["City"]=city;return o;
+}
+function citySummary(groups){
+  const S={}, ensure=e=>S[e]=S[e]||{proj:0,signed:0,hasStatus:false,inst:0,projSet:new Set(),byType:{}};
+  for(const g of groups.building){
+    const s=ensure(g.city||"Unknown");
+    const iST=g.headers.findIndex(h=>loose(h)==="projectstatus");
+    if(iST>=0)s.hasStatus=true;
+    for(const r of g.data){s.proj++; if(iST>=0&&STATUS_OK.includes(loose(r[iST])))s.signed++;}
+  }
+  for(const g of groups.point){
+    const s=ensure(g.city||"Unknown");
+    const iPID=g.headers.findIndex(h=>loose(h)==="projectid");
+    const iDM=g.headers.findIndex(h=>loose(h)==="devicemodel");
+    const iSS=g.headers.findIndex(h=>loose(h)==="screenstatus");
+    for(const r of g.data){
+      if(iSS<0||loose(r[iSS])!==INSTALLED)continue;
+      s.inst++;
+      const model=loose(r[iDM]); for(const c in DEVICE_MAP){if(loose(DEVICE_MAP[c])===model){s.byType[c]=(s.byType[c]||0)+1;break;}}
+      if(iPID>=0){const k=digits(r[iPID]); if(k)s.projSet.add(k);}
+    }
+  }
+  return S;
+}
+function renderSummary(S){
+  log("\n════════ SUMMARY ════════","hd");
+  const order=["Dubai","Abu Dhabi"];
+  const cities=[...order.filter(c=>S[c]),...Object.keys(S).filter(c=>!order.includes(c))];
+  for(const e of cities){
+    const s=S[e];
+    const signed=s.hasStatus?`Signed/Expired: ${s.signed}`:`Signed/Expired: n/a (no Project Status column)`;
+    log(`${e.toUpperCase()}`,"hd");
+    log(`  Project List : ${s.proj} projects   |   ${signed}`);
+    log(`  Point List   : ${s.inst} installed screens  in ${s.projSet.size} projects`);
+    log(`                 ${Object.keys(DEVICE_MAP).map(c=>`${c}: ${s.byType[c]||0}`).join("    ")}`);
+  }
+  log("═════════════════════════","hd");
+}
+$("run").onclick=async()=>{
+  $("log").innerHTML="";$("downloads").innerHTML="";
+  const groups={building:[],point:[]};
+  for(const f of chosen){
+    const buf=new Uint8Array(await f.arrayBuffer());
+    const wb=XLSX.read(buf,{type:"array"});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:"",raw:false});
+    if(!rows.length){log(`⚠️ ${f.name} is empty, skipped`,"warn");continue;}
+    const headers=rows[0].map(h=>String(h).trim());
+    const keys=new Set(headers.map(loose));
+    const b=BUILDING_SIG.filter(s=>keys.has(loose(s))).length;
+    const p=POINT_SIG.filter(s=>keys.has(loose(s))).length;
+    const kind=b>=p?"building":"point";
+    const fn=f.name.toLowerCase();
+    const city=fn.includes("dubai")?"Dubai":(fn.includes("abzb")||fn.includes("abu"))?"Abu Dhabi":"";
+    log(`• ${f.name} → ${kind==="building"?"Building list":"Point list"}${city?" | "+city:""}`);
+    groups[kind].push({f,headers,data:rows.slice(1),city});
+  }
+  const counts={},countsByName={},countsSales={},countsSalesByName={};
+  let exWall=0, exInsp=0;
+  for(const g of groups.point){
+    const iPID=g.headers.findIndex(h=>loose(h)==="projectid");
+    const iPN=g.headers.findIndex(h=>loose(h)==="projectname");
+    const iDM=g.headers.findIndex(h=>loose(h)==="devicemodel");
+    const iSS=g.headers.findIndex(h=>loose(h)==="screenstatus");
+    const iWT=findH(g.headers,"walltype","walltype");
+    const iIN=findH(g.headers,"inspectingstatus","inspect");
+    log(iWT>=0?`  Sales filter on "${g.f.name}": Wall Type = "${g.headers[iWT]}"`:`  ⚠️ ${g.f.name}: no "Wall Type" column — Wallpaper exclusion skipped.`, iWT>=0?null:"warn");
+    log(iIN>=0?`  Sales filter on "${g.f.name}": Inspecting = "${g.headers[iIN]}"`:`  ⚠️ ${g.f.name}: no "Inspecting Status" column — Normal filter skipped.`, iIN>=0?null:"warn");
+    for(const r of g.data){
+      if(iSS<0||loose(r[iSS])!==INSTALLED)continue;
+      const model=loose(r[iDM]); let col=null;
+      for(const c in DEVICE_MAP){if(loose(DEVICE_MAP[c])===model){col=c;break;}}
+      if(!col)continue;
+      const k=iPID>=0?digits(r[iPID]):"",nk=iPN>=0?loose(r[iPN]):"";
+      const isWP=iWT>=0&&loose(r[iWT]).includes(EXCLUDE_WALL);
+      const isNormal=(iIN<0)||loose(r[iIN])===NORMAL;
+      const okSales=!isWP&&isNormal;
+      if(isWP)exWall++; else if(!isNormal)exInsp++;
+      if(k){counts[k]=counts[k]||{};counts[k][col]=(counts[k][col]||0)+1;
+            if(okSales){countsSales[k]=countsSales[k]||{};countsSales[k][col]=(countsSales[k][col]||0)+1;}}
+      if(nk){countsByName[nk]=countsByName[nk]||{};countsByName[nk][col]=(countsByName[nk][col]||0)+1;
+             if(okSales){countsSalesByName[nk]=countsSalesByName[nk]||{};countsSalesByName[nk][col]=(countsSalesByName[nk][col]||0)+1;}}
+    }
+  }
+  log(`  → Sales screens excluded: ${exWall} (Wall Type = Wallpaper), ${exInsp} (Inspecting ≠ Normal).`,"ok");
+  const lookup=(cmap,cnmap,k,nk)=>(k&&cmap[k])?cmap[k]:((nk&&cnmap[nk])?cnmap[nk]:{});
+  {const keep=KEEP_BUILDING,m=lut(keep);let all=[];
+   for(const g of groups.building){
+     const ci={};keep.forEach(c=>ci[c]=g.headers.findIndex(h=>m[loose(h)]===c));
+     const iPID=g.headers.findIndex(h=>loose(h)==="projectid");
+     if(iPID<0)log(`  ⚠️ ${g.f.name}: no "Project ID" column — matching by Project Name instead.`,"warn");
+     keep.forEach(c=>{if(ci[c]<0&&!(c in DEVICE_MAP)&&c!=="Total Screens")log(`  ⚠️ ${g.f.name} missing "${c}" (left blank).`,"warn");});
+     for(const r of g.data){
+       const o=rowFrom(r,keep,ci,g.city);
+       const k=iPID>=0?digits(r[iPID]):"",nk=ci["Project Name"]>=0?loose(r[ci["Project Name"]]):"";
+       const cnt=lookup(counts,countsByName,k,nk);
+       let total=0;for(const col in DEVICE_MAP){const n=cnt[col]||0;o[col]=n;total+=n;}
+       o["Total Screens"]=total; all.push(o);
+     }
+   } if(all.length)emit("building",all,keep);}
+  {const keep=KEEP_POINT,m=lut(keep);let all=[];
+   for(const g of groups.point){
+     const ci={};keep.forEach(c=>ci[c]=g.headers.findIndex(h=>m[loose(h)]===c));
+     keep.forEach(c=>{if(ci[c]<0)log(`  ⚠️ ${g.f.name} missing "${c}" (left blank).`,"warn");});
+     for(const r of g.data)all.push(rowFrom(r,keep,ci,g.city));
+   } if(all.length)emit("point",all,keep);}
+  {const keep=KEEP_SALES,m=lut(keep);let all=[];let exCam=0,exSign=0,exName=0,exZero=0;
+   for(const g of groups.building){
+     const ci={};keep.forEach(c=>ci[c]=g.headers.findIndex(h=>m[loose(h)]===c));
+     const iPID=g.headers.findIndex(h=>loose(h)==="projectid");
+     const iRI=findH(g.headers,"restrictedindustries","restrictedindustr");
+     const iPS=findH(g.headers,"projectstatus","projectstatus");
+     log(iRI>=0?`  Sales filter on "${g.f.name}": Restricted = "${g.headers[iRI]}"`:`  ⚠️ ${g.f.name}: no "Restricted Industries" column — cannot exclude Camisole.`, iRI>=0?null:"warn");
+     log(iPS>=0?`  Sales filter on "${g.f.name}": Project Status = "${g.headers[iPS]}"`:`  ⚠️ ${g.f.name}: no "Project Status" column — cannot require Signed/Expired.`, iPS>=0?null:"warn");
+     for(const r of g.data){
+       if(iRI>=0&&loose(r[iRI]).includes(EXCLUDE_INDUSTRY)){exCam++;continue;}
+       if(iPS>=0&&!STATUS_OK.includes(loose(r[iPS]))){exSign++;continue;}
+       const o=rowFrom(r,keep,ci,g.city);
+       if(loose(o["Project Name"]).includes(EXCLUDE_NAME)){exName++;continue;}
+       const k=iPID>=0?digits(r[iPID]):"",nk=ci["Project Name"]>=0?loose(r[ci["Project Name"]]):"";
+       const cnt=lookup(countsSales,countsSalesByName,k,nk);
+       let total=0;for(const col in DEVICE_MAP){const n=cnt[col]||0;o[col]=n;total+=n;}
+       o["Total Screens"]=total;
+       if(total<=0){exZero++;continue;}
+       all.push(o);
+     }
+   }
+   log(`  → Sales projects excluded: ${exCam} (Camisole), ${exSign} (Status not Signed/Expired), ${exName} (name has "Focus Media"), ${exZero} (Total Screens = 0).`,"ok");
+   if(all.length)emit("sales",all,keep);}
+  renderSummary(citySummary(groups));
+  log("\nDone. Any ⚠️ above usually means a column name differs in one system — add it to ALIASES (or check DEVICE_MAP) and reload.");
+};
+</script>
+</body>
+</html>
